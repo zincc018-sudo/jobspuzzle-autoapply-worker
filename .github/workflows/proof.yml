@@ -1,6 +1,8 @@
 name: datacenter-stability-proof
 on:
-  workflow_dispatch:        # manual "Run workflow" button — no auto-runs
+  push:
+    branches: [master]      # runs on push — the reliable trigger for a fresh repo
+  workflow_dispatch:        # + manual "Run workflow" button
 
 jobs:
   proof:
