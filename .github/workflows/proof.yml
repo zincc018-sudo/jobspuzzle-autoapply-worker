@@ -20,4 +20,5 @@ jobs:
       - name: Run 3-form stability batch
         env:
           GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
+          IN_DOCKER: 'true'   # forces browser-use to add --no-sandbox for CI Chrome launch
         run: python proof_batch.py

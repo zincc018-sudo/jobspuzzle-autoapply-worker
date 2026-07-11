@@ -3,7 +3,12 @@
 # The per-form asyncio timeout (150s) is the crash-resilience from agent.py — a hung
 # browser can't drag the run out to 12 min like ashby did on Colab.
 import os, asyncio
-from browser_use import Agent, ChatGoogle
+from browser_use import Agent, ChatGoogle, BrowserProfile
+
+# chromium_sandbox=False -> browser-use adds --no-sandbox/--disable-dev-shm-usage, required
+# to launch Chrome on CI/datacenter runners (GitHub Actions). Without it the browser hangs
+# on start and hits browser-use's 30s BrowserStartEvent timeout (the 0/3 we just saw).
+PROFILE = BrowserProfile(headless=True, chromium_sandbox=False)
 
 KEYS = [k.strip() for k in os.environ.get("GEMINI_KEYS", "").split(",") if k.strip()]
 MODEL = "gemini-flash-latest"
@@ -21,7 +26,7 @@ TASK = ("Go to {url}, wait for it to render, dismiss any cookie banner, click Ap
         "NEVER click Submit/Send. Report: 'Reached form: yes/no.'")
 
 async def run(url, key):
-    a = Agent(task=TASK.format(url=url), llm=ChatGoogle(model=MODEL, api_key=key), available_file_paths=["cv.txt"])
+    a = Agent(task=TASK.format(url=url), llm=ChatGoogle(model=MODEL, api_key=key), browser_profile=PROFILE, available_file_paths=["cv.txt"])
     h = await asyncio.wait_for(a.run(max_steps=14), timeout=150)
     return h.final_result()
 
