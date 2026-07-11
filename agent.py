@@ -10,7 +10,12 @@
 # The review-gate (user clicks send) is the whole safety moat. Do not add a submit here.
 # ============================================================
 import asyncio, base64, os
-from browser_use import Agent, ChatGoogle
+from browser_use import Agent, ChatGoogle, BrowserProfile
+
+# chromium_sandbox=False -> browser-use adds --no-sandbox/--disable-dev-shm-usage, required
+# to launch headless Chrome on datacenter/CI boxes (GitHub Actions, most VPS/containers).
+# Without it Chrome hangs on start and hits browser-use's 30s BrowserStartEvent timeout.
+BROWSER_PROFILE = BrowserProfile(headless=True, chromium_sandbox=False)
 
 MODEL = "gemini-flash-latest"   # the only model available on all 12 keys (flash-lite 404s on most)
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT", "150"))  # hard cap per form — a hung browser
@@ -80,6 +85,7 @@ async def run_apply(url, profile, cv_path, keys, max_steps=18):
             files = [cv_path] if cv_path and os.path.exists(cv_path) else []
             agent = Agent(task=_task(url, profile),
                           llm=ChatGoogle(model=MODEL, api_key=key),
+                          browser_profile=BROWSER_PROFILE,
                           available_file_paths=files)
             # hard timeout so a hung/CDP-stuck browser can't block the worker forever
             history = await asyncio.wait_for(agent.run(max_steps=max_steps), timeout=RUN_TIMEOUT)
