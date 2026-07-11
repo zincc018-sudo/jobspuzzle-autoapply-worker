@@ -30,11 +30,37 @@ async def run(url, key):
     h = await asyncio.wait_for(a.run(max_steps=14), timeout=150)
     return h.final_result()
 
+DEAD = set()   # keys that hit their daily cap — skip for the rest of the run
+
+async def run_with_rotation(ats, url, start):
+    """Try keys round-robin from `start`; on quota-dead keys move to the next.
+    This is what run 29172218851 lacked — it drew the 3 most-burned keys by
+    position and never rotated, which misread key quota as a form failure."""
+    tried = 0
+    i = start
+    while tried < len(KEYS):
+        key = KEYS[i % len(KEYS)]; i += 1; tried += 1
+        if key in DEAD:
+            continue
+        try:
+            res = await run(url, key)
+            if res is None:   # agent stalled with no result — often a dry key's retry storm
+                DEAD.add(key); print(f"  [key#{(i-1)%len(KEYS)+1} no-result -> next key]", flush=True)
+                continue
+            return res
+        except Exception as e:
+            msg = str(e)
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "404" in msg:
+                DEAD.add(key); print(f"  [key#{(i-1)%len(KEYS)+1} quota/access -> next key]", flush=True)
+                continue
+            raise
+    return None
+
 async def main():
     ok = 0
     for i, (ats, url) in enumerate(FORMS):
         try:
-            res = await run(url, KEYS[i % len(KEYS)])
+            res = await run_with_rotation(ats, url, i * 4 + 3)  # start at #4/#8/#12 (least burned)
             reached = bool(res) and "reached form: yes" in (res or "").lower()
             ok += int(reached)
             print(f"### {ats}: reached={reached} :: {res}", flush=True)
