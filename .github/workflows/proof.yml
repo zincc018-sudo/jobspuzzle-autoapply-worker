@@ -1,0 +1,21 @@
+name: datacenter-stability-proof
+on:
+  workflow_dispatch:        # manual "Run workflow" button — no auto-runs
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest  # GitHub's x86 datacenter runner, dedicated 7GB RAM
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install browser-use + Chromium
+        run: |
+          pip install -q browser-use==0.13.3 playwright
+          python -m playwright install --with-deps chromium
+      - name: Run 3-form stability batch
+        env:
+          GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
+        run: python proof_batch.py
