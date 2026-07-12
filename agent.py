@@ -12,6 +12,10 @@
 import asyncio, base64, os
 from browser_use import Agent, ChatGoogle, BrowserProfile
 try:
+    from browser_use import ChatGroq          # native Groq support (browser-use ships it)
+except Exception:
+    ChatGroq = None                            # older lib — Groq keys just get skipped
+try:
     from deterministic import ats_platform, deterministic_fill, deterministic_submit   # Tier-1 zero-LLM
 except Exception:
     ats_platform = lambda u: None; deterministic_fill = None; deterministic_submit = None  # LLM-only if unavailable
@@ -22,6 +26,18 @@ except Exception:
 BROWSER_PROFILE = BrowserProfile(headless=True, chromium_sandbox=False)
 
 MODEL = "gemini-flash-latest"   # the only model available on all 12 keys (flash-lite 404s on most)
+# Groq vision model for the Track-2 key pool (free tier ~500K tokens/day/key,
+# measured 2026-07-12). Used for keys prefixed "groq:" in the ring — INACTIVE
+# until GROQ_KEYS is set in the worker env (zinc delivering 10 keys).
+GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+def _make_llm(key):
+    """Key entries may be prefixed 'groq:' (Groq) — everything else = Gemini."""
+    if isinstance(key, str) and key.startswith("groq:"):
+        if ChatGroq is None:
+            return None
+        return ChatGroq(model=GROQ_MODEL, api_key=key[len("groq:"):])
+    return ChatGoogle(model=MODEL, api_key=key)
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT", "150"))  # hard cap per form — a hung browser
 # (the ashby CDP hang on Colab ran 11 min) must NOT block the queue. Timeout -> caught -> requeued.
 
@@ -95,9 +111,13 @@ async def run_apply(url, profile, cv_path, keys, max_steps=18, submit=False):
         if not key:
             return {"reached": False, "fields": "", "submitted": False, "screenshot_b64": None, "error": "no usable key"}
         try:
+            llm = _make_llm(key)
+            if llm is None:            # groq key but no ChatGroq in this lib version
+                ring.mark_bad(key)
+                continue
             files = [cv_path] if cv_path and os.path.exists(cv_path) else []
             agent = Agent(task=_task(url, profile, submit=submit),
-                          llm=ChatGoogle(model=MODEL, api_key=key),
+                          llm=llm,
                           browser_profile=BROWSER_PROFILE,
                           available_file_paths=files)
             # hard timeout so a hung/CDP-stuck browser can't block the worker forever

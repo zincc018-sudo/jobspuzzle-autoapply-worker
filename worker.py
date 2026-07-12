@@ -16,6 +16,10 @@ from agent import smart_fill, KeyRing   # smart_fill routes deterministic (zero-
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
 KEYS = [k.strip() for k in os.environ.get("GEMINI_KEYS", "").split(",") if k.strip()]
+# Track-2 pool (2026-07-12): Groq keys ride the same ring with a "groq:" prefix —
+# agent._make_llm() routes them to ChatGroq/llama-4-scout (vision, ~500K tok/day/key
+# free). INACTIVE until the GROQ_KEYS secret is set (zinc delivering 10 keys).
+KEYS += ["groq:" + k.strip() for k in os.environ.get("GROQ_KEYS", "").split(",") if k.strip()]
 WORKER_ID = os.environ.get("WORKER_ID", "worker-1")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # requeue transient crashes up to this many times
