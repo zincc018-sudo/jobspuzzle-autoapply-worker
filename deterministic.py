@@ -108,6 +108,126 @@ async def _fill_form(page, p, cv_path):
     return out
 
 
+# ── SUBMIT phase (post-Approve only) ────────────────────────────────────────
+# The FILL path above NEVER submits. This block adds a deterministic SUBMIT used
+# ONLY by the worker's submit phase, which runs ONLY after the user clicked
+# Approve in the review-gate. submitted=True is returned ONLY when a real
+# confirmation (URL or on-page text) is seen — a clicked button alone is not proof.
+_SUBMIT = {
+    "greenhouse":    ["button:has-text('Submit Application')", "button:has-text('Submit application')", "#submit_app", "input[type=submit]"],
+    "lever":         ["button:has-text('Submit application')", "button.template-btn-submit", "button[type=submit]"],
+    "ashby":         ["button:has-text('Submit Application')", "button:has-text('Submit')", "button[type=submit]"],
+    "teamtailor":    ["button:has-text('Send application')", "button:has-text('Submit application')", "button[type=submit]"],
+    "workable":      ["button:has-text('Submit')", "#btn-submit", "button[type=submit]"],
+    "careerfinders": ["button:has-text('Submit')", "input[type=submit]", "button[type=submit]"],
+}
+_CONFIRM_URL = re.compile(r"(confirmation|thank|success|submitted|application-received|/complete)", re.I)
+_CONFIRM_TEXT = re.compile(
+    r"(thank you|application (has been )?(submitted|received|sent)|successfully (applied|submitted)|"
+    r"we('| ha)ve received your application|your application (has been|was) (sent|submitted|received))", re.I)
+
+async def _find_submit(page, platform):
+    for sel in _SUBMIT.get(platform, ["button[type=submit]", "input[type=submit]"]):
+        try:
+            loc = page.locator(sel)
+            for i in range(await loc.count()):
+                el = loc.nth(i)
+                if await el.is_visible() and await el.is_enabled():
+                    return el
+        except Exception:
+            continue
+    return None
+
+async def _confirmed(page):
+    try:
+        if _CONFIRM_URL.search(page.url or ""):
+            return True
+        body = (await page.inner_text("body"))[:6000]
+        if _CONFIRM_TEXT.search(body or ""):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def deterministic_submit(url, profile, cv_path, dry_run=False):
+    """SUBMIT phase (post-Approve): fill + click the FINAL submit + read back a
+    confirmation. ZERO LLM. dry_run=True fills + LOCATES the submit button but does
+    NOT click it (proves the submit control is reachable WITHOUT sending anything).
+    submitted=True only when a confirmation page/text is actually seen."""
+    platform = ats_platform(url) or ""
+    name = profile.get("name") or profile.get("full_name") or "Applicant"
+    parts = name.split()
+    p = {"first": parts[0] if parts else name, "last": " ".join(parts[1:]) or (parts[0] if parts else name),
+         "full": name, "email": profile.get("email") or "", "phone": profile.get("phone") or ""}
+    result = {"reached": False, "fields": "", "submitted": False, "screenshot_b64": None,
+              "error": None, "engine": f"deterministic-submit:{platform}"}
+    async with async_playwright() as pw:
+        b = await pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        try:
+            pg = await b.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+            await pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await pg.wait_for_timeout(3000)
+            title = (await pg.title()) or ""
+            if any(x in title.lower() for x in ["just a moment", "attention required", "access denied", "captcha"]):
+                result["error"] = f"anti-bot: {title[:40]}"; return result
+            for c in ["button:has-text('Accept all')", "button:has-text('Accept All')",
+                      "button:has-text('Decline all')", "#onetrust-accept-btn-handler"]:
+                try:
+                    el = pg.locator(c)
+                    if await el.count() > 0 and await el.first.is_visible():
+                        await el.first.click(); await pg.wait_for_timeout(600); break
+                except Exception:
+                    pass
+            fields = await _fill_form(pg, p, cv_path)
+            if not fields.get("name") and not fields.get("email"):
+                for sel in ["button:has-text('Apply for this job')", "button:has-text('Apply now')",
+                            "button:has-text(\"I'm interested\")", "a:has-text(\"I'm interested\")",
+                            "a:has-text('Apply')", "button:has-text('Apply')"]:
+                    try:
+                        el = pg.locator(sel)
+                        if await el.count() > 0 and await el.first.is_visible():
+                            await el.first.click(); await pg.wait_for_timeout(4000); break
+                    except Exception:
+                        continue
+                fields = await _fill_form(pg, p, cv_path)
+            result["reached"] = bool(fields.get("name")) and bool(fields.get("email"))
+            submit_el = await _find_submit(pg, platform)
+            filled_list = ', '.join(k for k in fields if k != 'resume')
+            if not result["reached"]:
+                result["error"] = "fill incomplete — refusing to submit"
+            elif submit_el is None:
+                result["error"] = "submit button not found — needs manual submit"
+            elif dry_run:
+                result["fields"] = (f"DRY-RUN ok: reached + submit button located (NOT clicked). "
+                                    f"Fields: {filled_list}. Resume: {'yes' if fields.get('resume') else 'no'}.")
+            else:
+                # THE REAL SUBMIT — reached only in the non-dry-run submit phase, post-Approve.
+                try:
+                    await submit_el.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                await submit_el.click()
+                await pg.wait_for_timeout(6000)   # let the POST + any redirect settle
+                result["submitted"] = await _confirmed(pg)
+                if not result["submitted"]:
+                    result["error"] = "clicked submit but no confirmation seen (form may need required fields answered)"
+            try:
+                shot = await pg.screenshot(full_page=False)
+                result["screenshot_b64"] = base64.b64encode(shot).decode()
+            except Exception:
+                pass
+            if not result["fields"]:
+                result["fields"] = (f"Reached: {'yes' if result['reached'] else 'no'}. "
+                                    f"Submitted: {'yes' if result['submitted'] else 'no'}. Fields: {filled_list}. "
+                                    f"Resume: {'yes' if fields.get('resume') else 'no'}.")
+        except Exception as e:
+            result["error"] = str(e)[:200]
+        finally:
+            await b.close()
+    return result
+
+
 async def deterministic_fill(url, profile, cv_path):
     """Fill a known-ATS form with NO LLM. Returns run_apply-compatible dict.
     reached=True only if name AND email were filled (the fill actually landed)."""

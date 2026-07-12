@@ -12,9 +12,9 @@
 import asyncio, base64, os
 from browser_use import Agent, ChatGoogle, BrowserProfile
 try:
-    from deterministic import ats_platform, deterministic_fill   # Tier-1 zero-LLM filler
+    from deterministic import ats_platform, deterministic_fill, deterministic_submit   # Tier-1 zero-LLM
 except Exception:
-    ats_platform = lambda u: None; deterministic_fill = None      # LLM-only if unavailable
+    ats_platform = lambda u: None; deterministic_fill = None; deterministic_submit = None  # LLM-only if unavailable
 
 # chromium_sandbox=False -> browser-use adds --no-sandbox/--disable-dev-shm-usage, required
 # to launch headless Chrome on datacenter/CI boxes (GitHub Actions, most VPS/containers).
@@ -137,6 +137,16 @@ async def smart_fill(url, profile, cv_path, keys, max_steps=18, submit=False):
                 r["engine"] = f"deterministic:{plat}"
                 return r
             # fill didn't land -> fall through to the LLM agent
+        except Exception:
+            pass
+    if plat and submit and deterministic_submit is not None:
+        # SUBMIT phase, proven host: deterministic fill + click + confirmation read-back
+        # (zero LLM). Runs ONLY here (post-Approve). If it can't confirm, fall through
+        # to the LLM submit as a backstop.
+        try:
+            r = await deterministic_submit(url, profile, cv_path)
+            if r.get("submitted"):
+                return r   # engine already 'deterministic-submit:<plat>'
         except Exception:
             pass
     r = await run_apply(url, profile, cv_path, keys, max_steps=max_steps, submit=submit)
