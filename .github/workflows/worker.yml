@@ -1,0 +1,33 @@
+name: autoapply-worker-drain
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'   # every ~15 min, off the top-of-hour
+  workflow_dispatch:               # + manual "Run workflow"
+
+# only one drain at a time (no overlapping workers double-claiming)
+concurrency:
+  group: autoapply-drain
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps + Chromium
+        run: |
+          pip install -q browser-use==0.13.3 supabase playwright
+          python -m playwright install --with-deps chromium
+      - name: Drain the auto-apply queue (deterministic Tier-1 + LLM fallback)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
+          DRAIN_ONCE: '1'
+          IN_DOCKER: 'true'      # forces --no-sandbox for the LLM-fallback browser on CI
+          WORKER_ID: gha-drain
+        run: python worker.py
