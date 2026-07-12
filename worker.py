@@ -10,7 +10,7 @@
 # ============================================================
 import os, time, tempfile, traceback, urllib.request, asyncio
 from supabase import create_client
-from agent import run_apply, KeyRing
+from agent import smart_fill, KeyRing   # smart_fill routes deterministic (zero-LLM) vs LLM
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
@@ -38,32 +38,38 @@ def _download_cv(cv_url):
 def _update(job_id, patch):
     sb.table("autoapply_jobs").update(patch).eq("id", job_id).execute()
 
-def process(job):
+def process(job, submit=False):
+    """submit=False = FILL phase (fill + screenshot + STOP, -> prepared for user review).
+       submit=True  = SUBMIT phase (user approved; re-fill + click submit -> submitted)."""
     jid = job["id"]
-    print(f"[claim] {jid} -> {job['apply_url']}", flush=True)
+    phase = "submit" if submit else "fill"
+    retry_status = "approved" if submit else "queued"   # requeue back into the same phase
+    print(f"[{phase}] {jid} -> {job['apply_url']}", flush=True)
     cv_path = _download_cv(job.get("cv_url"))
-    attempts = job.get("attempts") or 1   # claim_autoapply_job already incremented this
+    attempts = job.get("attempts") or 1   # claim RPC already incremented this
     try:
-        r = asyncio.run(run_apply(job["apply_url"], job.get("profile") or {}, cv_path, ring))
-        if r["reached"]:
-            status = "prepared"
+        r = asyncio.run(smart_fill(job["apply_url"], job.get("profile") or {}, cv_path, ring, submit=submit))
+        done_ok = r["submitted"] if submit else r["reached"]
+        if done_ok:
+            status = "submitted" if submit else "prepared"
         elif attempts < MAX_ATTEMPTS:
-            status = "queued"   # transient crash/hang/CDP error — retry on the next drain
+            status = retry_status   # transient crash/hang/CDP/rate error — retry this phase
         else:
-            status = "failed"   # exhausted retries — stop, surface honestly to the user
-        _update(jid, {
+            status = "failed"       # exhausted retries — surface honestly to the user
+        patch = {
             "status": status,
-            "reached_form": r["reached"],
-            "result": {"fields": r.get("fields"), "error": r.get("error"), "model": "gemini-flash-latest", "attempt": attempts},
-            "screenshot": r.get("screenshot_b64"),
+            "result": {"fields": r.get("fields"), "error": r.get("error"), "engine": r.get("engine"), "attempt": attempts, "phase": phase},
             "updated_at": "now()",
-        })
-        print(f"[done] {jid} status={status} reached={r['reached']} attempt={attempts}/{MAX_ATTEMPTS}", flush=True)
+        }
+        if not submit:
+            patch["reached_form"] = r["reached"]
+            patch["screenshot"] = r.get("screenshot_b64")   # the review-gate image
+        _update(jid, patch)
+        print(f"[{phase} done] {jid} status={status} ok={done_ok} attempt={attempts}/{MAX_ATTEMPTS}", flush=True)
     except Exception:
-        # even a hard crash requeues (up to the cap) so one bad job never dead-ends silently
-        status = "queued" if attempts < MAX_ATTEMPTS else "failed"
-        _update(jid, {"status": status, "result": {"error": traceback.format_exc()[:500], "attempt": attempts}, "updated_at": "now()"})
-        print(f"[error] {jid} status={status} attempt={attempts}\n{traceback.format_exc()}", flush=True)
+        status = retry_status if attempts < MAX_ATTEMPTS else "failed"
+        _update(jid, {"status": status, "result": {"error": traceback.format_exc()[:500], "attempt": attempts, "phase": phase}, "updated_at": "now()"})
+        print(f"[{phase} error] {jid} status={status} attempt={attempts}\n{traceback.format_exc()}", flush=True)
     finally:
         if cv_path and os.path.exists(cv_path):
             try: os.remove(cv_path)
@@ -75,11 +81,14 @@ def main():
         print("[worker] FATAL: no GEMINI_KEYS set", flush=True); return
     while True:
         try:
-            res = sb.rpc("claim_autoapply_job", {"p_worker": WORKER_ID}).execute()
-            jobs = res.data or []
-            if jobs:
-                process(jobs[0])
-                continue                     # immediately try for the next one
+            # SUBMIT phase first — a user is actively waiting on an approved job.
+            res = sb.rpc("claim_autoapply_job", {"p_worker": WORKER_ID, "p_status": "approved", "p_next": "submitting"}).execute()
+            if res.data:
+                process(res.data[0], submit=True); continue
+            # else FILL phase — prepare a queued job for review.
+            res = sb.rpc("claim_autoapply_job", {"p_worker": WORKER_ID, "p_status": "queued", "p_next": "preparing"}).execute()
+            if res.data:
+                process(res.data[0], submit=False); continue
         except Exception as e:
             print(f"[poll] error: {e}", flush=True)
         time.sleep(POLL_SECONDS)

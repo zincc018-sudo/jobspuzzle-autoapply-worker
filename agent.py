@@ -11,6 +11,10 @@
 # ============================================================
 import asyncio, base64, os
 from browser_use import Agent, ChatGoogle, BrowserProfile
+try:
+    from deterministic import ats_platform, deterministic_fill   # Tier-1 zero-LLM filler
+except Exception:
+    ats_platform = lambda u: None; deterministic_fill = None      # LLM-only if unavailable
 
 # chromium_sandbox=False -> browser-use adds --no-sandbox/--disable-dev-shm-usage, required
 # to launch headless Chrome on datacenter/CI boxes (GitHub Actions, most VPS/containers).
@@ -37,21 +41,30 @@ class KeyRing:
     def mark_bad(self, k):
         self.bad.add(k)
 
-def _task(url, p):
+def _task(url, p, submit=False):
     name = p.get("name") or p.get("full_name") or "Applicant"
     email = p.get("email") or ""
     phone = p.get("phone") or ""
-    return (
+    common = (
         f"Go to {url} and WAIT for it to fully render (some are JavaScript single-page apps). "
         "Dismiss any cookie/consent banner (Accept or Decline). "
         "If there is an 'Apply' / 'Apply for this job' / 'Apply now' button, click it to open the form. "
         f"Fill ONLY these three fields: Name '{name}', Email '{email}', Phone '{phone}'. "
         "Upload the available resume file into the resume/CV field if one exists. "
-        "EFFICIENCY RULE: do NOT search for, scroll to, or fill any OPTIONAL field (location, "
-        "cover letter, links, demographics, work authorization). Do NOT re-verify fields you already "
-        "filled. The MOMENT name+email+phone are filled and the resume is attached, call done "
-        "IMMEDIATELY — aim to finish within 8 steps total. "
-        "ABSOLUTE RULE: NEVER click Submit / Apply-final / Send / Continue-to-submit. "
+        "Do NOT search for, scroll to, or fill any OPTIONAL field (location, cover letter, links, "
+        "demographics, work authorization). Do NOT re-verify fields you already filled. "
+    )
+    if submit:
+        # SUBMIT PHASE — only reached AFTER the user reviewed the filled form + clicked Approve.
+        return common + (
+            "Once name+email+phone are filled and the resume is attached, click the FINAL Submit / "
+            "Apply / Send button to submit the application. If a confirmation dialog appears, confirm it. "
+            "Then call done and report EXACTLY: 'Submitted: yes/no. Confirmation seen: <text or no>.'"
+        )
+    # FILL PHASE — fills + STOPS, so the user can review before anything is sent.
+    return common + (
+        "The MOMENT name+email+phone are filled and the resume is attached, call done IMMEDIATELY "
+        "(aim <=8 steps). ABSOLUTE RULE: NEVER click Submit / Apply-final / Send / Continue-to-submit. "
         "Report EXACTLY: 'Reached form: yes/no. Fields filled: <list>. Resume attached: yes/no. "
         "Captcha/login: yes/no.'"
     )
@@ -74,7 +87,7 @@ async def _screenshot(agent, history):
         pass
     return None
 
-async def run_apply(url, profile, cv_path, keys, max_steps=18):
+async def run_apply(url, profile, cv_path, keys, max_steps=18, submit=False):
     ring = keys if isinstance(keys, KeyRing) else KeyRing(keys)
     last_err = None
     for _attempt in range(2):            # rotate to a fresh key once on failure
@@ -83,7 +96,7 @@ async def run_apply(url, profile, cv_path, keys, max_steps=18):
             return {"reached": False, "fields": "", "submitted": False, "screenshot_b64": None, "error": "no usable key"}
         try:
             files = [cv_path] if cv_path and os.path.exists(cv_path) else []
-            agent = Agent(task=_task(url, profile),
+            agent = Agent(task=_task(url, profile, submit=submit),
                           llm=ChatGoogle(model=MODEL, api_key=key),
                           browser_profile=BROWSER_PROFILE,
                           available_file_paths=files)
@@ -96,7 +109,8 @@ async def run_apply(url, profile, cv_path, keys, max_steps=18):
                 continue
             low = final.lower()
             reached = "reached form: yes" in low
-            return {"reached": reached, "fields": final, "submitted": False,
+            submitted = submit and "submitted: yes" in low
+            return {"reached": reached or submitted, "fields": final, "submitted": submitted,
                     "screenshot_b64": shot, "error": None}
         except asyncio.TimeoutError:
             last_err = f"run timed out after {RUN_TIMEOUT}s (browser hang) — requeue"
@@ -109,6 +123,26 @@ async def run_apply(url, profile, cv_path, keys, max_steps=18):
                 continue
             break
     return {"reached": False, "fields": "", "submitted": False, "screenshot_b64": None, "error": last_err}
+
+
+async def smart_fill(url, profile, cv_path, keys, max_steps=18, submit=False):
+    """Router: Tier-1 deterministic (zero LLM) for the 6 proven ATS hosts; LLM agent
+    otherwise, OR if the deterministic fill doesn't land (selector drift -> graceful
+    fallback). The SUBMIT phase always uses the LLM path (deterministic submit unproven)."""
+    plat = ats_platform(url)
+    if plat and not submit and deterministic_fill is not None:
+        try:
+            r = await deterministic_fill(url, profile, cv_path)
+            if r.get("reached"):
+                r["engine"] = f"deterministic:{plat}"
+                return r
+            # fill didn't land -> fall through to the LLM agent
+        except Exception:
+            pass
+    r = await run_apply(url, profile, cv_path, keys, max_steps=max_steps, submit=submit)
+    if isinstance(r, dict):
+        r.setdefault("engine", "llm")
+    return r
 
 
 if __name__ == "__main__":
