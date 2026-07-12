@@ -1,0 +1,14 @@
+name: dc-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Probe Workable search API from a datacenter IP
+        run: |
+          for loc in "Pakistan" "India" "Saudi%20Arabia"; do
+            code=$(curl -s -o /tmp/r.json -w "%{http_code}" "https://jobs.workable.com/api/v1/jobs?query=&location=$loc" -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36")
+            total=$(python3 -c "import json;print(json.load(open('/tmp/r.json')).get('totalSize','?'))" 2>/dev/null || echo parse-fail)
+            echo "PROBE $loc -> HTTP $code totalSize=$total"
+          done
