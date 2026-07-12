@@ -9,6 +9,7 @@
 # Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE, GEMINI_KEYS (comma-sep), WORKER_ID (optional)
 # ============================================================
 import os, time, tempfile, traceback, urllib.request, asyncio
+from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from agent import smart_fill, KeyRing   # smart_fill routes deterministic (zero-LLM) vs LLM
 
@@ -18,6 +19,7 @@ KEYS = [k.strip() for k in os.environ.get("GEMINI_KEYS", "").split(",") if k.str
 WORKER_ID = os.environ.get("WORKER_ID", "worker-1")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # requeue transient crashes up to this many times
+DRAIN_ONCE = os.environ.get("DRAIN_ONCE") == "1"          # drain the queue then exit (for cron/CI)
 
 sb = create_client(SUPABASE_URL, SERVICE_ROLE)
 ring = KeyRing(KEYS)
@@ -75,23 +77,41 @@ def process(job, submit=False):
             try: os.remove(cv_path)
             except Exception: pass
 
+def reclaim_stale():
+    """A worker that died AFTER claiming but BEFORE writing back leaves a job stuck in
+    'preparing'/'submitting'. Reset anything stuck >15 min back to its queue so it retries."""
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        for stuck, back in (("preparing", "queued"), ("submitting", "approved")):
+            r = sb.table("autoapply_jobs").update({"status": back}).eq("status", stuck).lt("updated_at", cutoff).execute()
+            if r.data:
+                print(f"[reclaim] {len(r.data)} stuck '{stuck}' -> '{back}'", flush=True)
+    except Exception as e:
+        print(f"[reclaim] error: {e}", flush=True)
+
 def main():
     print(f"[worker] {WORKER_ID} up. keys={len(KEYS)} poll={POLL_SECONDS}s", flush=True)
     if not KEYS:
         print("[worker] FATAL: no GEMINI_KEYS set", flush=True); return
+    reclaim_stale()
     while True:
+        did = False
         try:
             # SUBMIT phase first — a user is actively waiting on an approved job.
             res = sb.rpc("claim_autoapply_job", {"p_worker": WORKER_ID, "p_status": "approved", "p_next": "submitting"}).execute()
             if res.data:
-                process(res.data[0], submit=True); continue
-            # else FILL phase — prepare a queued job for review.
-            res = sb.rpc("claim_autoapply_job", {"p_worker": WORKER_ID, "p_status": "queued", "p_next": "preparing"}).execute()
-            if res.data:
-                process(res.data[0], submit=False); continue
+                process(res.data[0], submit=True); did = True
+            else:
+                # else FILL phase — prepare a queued job for review.
+                res = sb.rpc("claim_autoapply_job", {"p_worker": WORKER_ID, "p_status": "queued", "p_next": "preparing"}).execute()
+                if res.data:
+                    process(res.data[0], submit=False); did = True
         except Exception as e:
             print(f"[poll] error: {e}", flush=True)
-        time.sleep(POLL_SECONDS)
+        if not did:
+            if DRAIN_ONCE:
+                print("[worker] queue empty — exiting (drain-once)", flush=True); return
+            time.sleep(POLL_SECONDS)
 
 if __name__ == "__main__":
     main()
