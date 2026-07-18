@@ -24,7 +24,7 @@ jobs:
           keys = ["mistral:" + k for k in os.environ["MISTRAL_KEYS"].split(",") if k.strip()]
           profile = {"name": "Droid Test", "email": "droid-autofill-test@applyright.dev", "phone": "+31612345678"}
           url = "https://jobs.lever.co/educative/aa4fe6c6-9714-4ec6-9291-da21a3d4b252/apply"
-          r = asyncio.run(run_apply(url, profile, None, KeyRing(keys), max_steps=14))
+          r = asyncio.run(run_apply(url, profile, None, KeyRing(keys), max_steps=18))
           r["screenshot_b64"] = f"[{len(r.get('screenshot_b64') or '')} b64 chars]"
           print("MISTRAL-FILL-RESULT:", json.dumps(r))
           PY

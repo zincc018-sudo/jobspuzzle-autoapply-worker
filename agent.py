@@ -40,8 +40,10 @@ MODEL = "gemini-flash-latest"   # the only model available on all 12 keys (flash
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 # Mistral vision model (key-probed 2026-07-13: /v1/models lists it vision-capable;
 # a real ATS-form screenshot was read correctly — Bitpanda form, First/Last name).
+# small-latest FAILED the datacenter drive test (wandered off-form, 0/14 steps landed);
+# medium-latest is the free-tier vision model strong enough to drive.
 # Free Experiment tier ≈ 1B tokens/month, low RPM ceiling.
-MISTRAL_MODEL = "mistral-small-latest"
+MISTRAL_MODEL = "mistral-medium-latest"
 
 def _make_llm(key):
     """Key prefix routes the provider: 'groq:' -> Groq, 'mistral:' -> Mistral
