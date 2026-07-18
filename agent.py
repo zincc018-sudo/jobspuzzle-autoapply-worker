@@ -55,10 +55,16 @@ def _make_llm(key):
         return ChatGroq(model=GROQ_MODEL, api_key=key[len("groq:"):])
     if isinstance(key, str) and key.startswith("mistral:"):
         k = key[len("mistral:"):]
-        if ChatMistral is not None:
-            return ChatMistral(model=MISTRAL_MODEL, api_key=k)
+        # Deliberately PREFER the OpenAI-compatible route over native ChatMistral:
+        # dc drive tests 2026-07-18 showed ChatMistral throwing empty
+        # ModelProviderErrors on agent steps (6/6 consecutive on medium) while the
+        # SAME key + payload sizes pass 200 when called directly — the wrapper, not
+        # the API, is the problem. ChatOpenAI is browser-use's most-tested path and
+        # Mistral's /v1 is OpenAI-compatible.
         if ChatOpenAI is not None:
             return ChatOpenAI(model=MISTRAL_MODEL, api_key=k, base_url="https://api.mistral.ai/v1")
+        if ChatMistral is not None:
+            return ChatMistral(model=MISTRAL_MODEL, api_key=k)
         return None
     return ChatGoogle(model=MODEL, api_key=key)
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT", "150"))  # hard cap per form — a hung browser
