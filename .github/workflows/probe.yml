@@ -1,14 +1,30 @@
 name: dc-probe
 on: workflow_dispatch
 jobs:
-  probe:
+  mistral-fill:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 12
     steps:
-      - name: Probe Workable search API from a datacenter IP
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps + Chromium
         run: |
-          for loc in "Pakistan" "India" "Saudi%20Arabia"; do
-            code=$(curl -s -o /tmp/r.json -w "%{http_code}" "https://jobs.workable.com/api/v1/jobs?query=&location=$loc" -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36")
-            total=$(python3 -c "import json;print(json.load(open('/tmp/r.json')).get('totalSize','?'))" 2>/dev/null || echo parse-fail)
-            echo "PROBE $loc -> HTTP $code totalSize=$total"
-          done
+          pip install -q browser-use==0.13.3 supabase playwright
+          python -m playwright install --with-deps chromium
+      - name: REAL Mistral fill test (browser-use + mistral-small on a live Lever form)
+        env:
+          MISTRAL_KEYS: ${{ secrets.MISTRAL_KEYS }}
+          IN_DOCKER: 'true'
+        run: |
+          python - <<'PY'
+          import asyncio, os, json
+          from agent import run_apply, KeyRing
+          keys = ["mistral:" + k for k in os.environ["MISTRAL_KEYS"].split(",") if k.strip()]
+          profile = {"name": "Droid Test", "email": "droid-autofill-test@applyright.dev", "phone": "+31612345678"}
+          url = "https://jobs.lever.co/educative/aa4fe6c6-9714-4ec6-9291-da21a3d4b252/apply"
+          r = asyncio.run(run_apply(url, profile, None, KeyRing(keys), max_steps=14))
+          r["screenshot_b64"] = f"[{len(r.get('screenshot_b64') or '')} b64 chars]"
+          print("MISTRAL-FILL-RESULT:", json.dumps(r))
+          PY

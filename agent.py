@@ -16,6 +16,14 @@ try:
 except Exception:
     ChatGroq = None                            # older lib — Groq keys just get skipped
 try:
+    from browser_use import ChatMistral        # native Mistral support (if this lib version ships it)
+except Exception:
+    ChatMistral = None
+try:
+    from browser_use import ChatOpenAI         # fallback path: Mistral's API is OpenAI-compatible
+except Exception:
+    ChatOpenAI = None
+try:
     from deterministic import ats_platform, deterministic_fill, deterministic_submit   # Tier-1 zero-LLM
 except Exception:
     ats_platform = lambda u: None; deterministic_fill = None; deterministic_submit = None  # LLM-only if unavailable
@@ -30,13 +38,26 @@ MODEL = "gemini-flash-latest"   # the only model available on all 12 keys (flash
 # measured 2026-07-12). Used for keys prefixed "groq:" in the ring — INACTIVE
 # until GROQ_KEYS is set in the worker env (zinc delivering 10 keys).
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Mistral vision model (key-probed 2026-07-13: /v1/models lists it vision-capable;
+# a real ATS-form screenshot was read correctly — Bitpanda form, First/Last name).
+# Free Experiment tier ≈ 1B tokens/month, low RPM ceiling.
+MISTRAL_MODEL = "mistral-small-latest"
 
 def _make_llm(key):
-    """Key entries may be prefixed 'groq:' (Groq) — everything else = Gemini."""
+    """Key prefix routes the provider: 'groq:' -> Groq, 'mistral:' -> Mistral
+    (native ChatMistral if the lib ships it, else the OpenAI-compatible endpoint).
+    Bare keys = Gemini."""
     if isinstance(key, str) and key.startswith("groq:"):
         if ChatGroq is None:
             return None
         return ChatGroq(model=GROQ_MODEL, api_key=key[len("groq:"):])
+    if isinstance(key, str) and key.startswith("mistral:"):
+        k = key[len("mistral:"):]
+        if ChatMistral is not None:
+            return ChatMistral(model=MISTRAL_MODEL, api_key=k)
+        if ChatOpenAI is not None:
+            return ChatOpenAI(model=MISTRAL_MODEL, api_key=k, base_url="https://api.mistral.ai/v1")
+        return None
     return ChatGoogle(model=MODEL, api_key=key)
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT", "150"))  # hard cap per form — a hung browser
 # (the ashby CDP hang on Colab ran 11 min) must NOT block the queue. Timeout -> caught -> requeued.

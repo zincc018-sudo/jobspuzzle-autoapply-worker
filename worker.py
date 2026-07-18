@@ -20,6 +20,9 @@ KEYS = [k.strip() for k in os.environ.get("GEMINI_KEYS", "").split(",") if k.str
 # agent._make_llm() routes them to ChatGroq/llama-4-scout (vision, ~500K tok/day/key
 # free). INACTIVE until the GROQ_KEYS secret is set (zinc delivering 10 keys).
 KEYS += ["groq:" + k.strip() for k in os.environ.get("GROQ_KEYS", "").split(",") if k.strip()]
+# Mistral pool (2026-07-13): free Experiment tier ≈1B tokens/month. Listed FIRST so the
+# ring prefers Mistral (deep quota) before burning the 20/day Gemini keys.
+KEYS = ["mistral:" + k.strip() for k in os.environ.get("MISTRAL_KEYS", "").split(",") if k.strip()] + KEYS
 WORKER_ID = os.environ.get("WORKER_ID", "worker-1")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # requeue transient crashes up to this many times
