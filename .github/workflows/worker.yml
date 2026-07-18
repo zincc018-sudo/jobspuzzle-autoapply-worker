@@ -28,6 +28,7 @@ jobs:
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
           GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
           GROQ_KEYS: ${{ secrets.GROQ_KEYS }}
+          MISTRAL_KEYS: ${{ secrets.MISTRAL_KEYS }}
           DRAIN_ONCE: '1'
           IN_DOCKER: 'true'      # forces --no-sandbox for the LLM-fallback browser on CI
           WORKER_ID: gha-drain
