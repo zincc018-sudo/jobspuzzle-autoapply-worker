@@ -1,8 +1,15 @@
 name: autoapply-worker-drain
 on:
   schedule:
-    - cron: '7,22,37,52 * * * *'   # every ~15 min, off the top-of-hour
-  workflow_dispatch:               # + manual "Run workflow"
+    # Every 5 min (was 15). MEASURED 2026-07-25 across the previous 40 real runs: the
+    # 15-min cron actually fired a median of 94 min apart (max 202), because GitHub delays
+    # and drops scheduled runs under load — docs: "The schedule event can be delayed during
+    # periods of high loads of GitHub Actions workflow runs... some queued jobs may be
+    # dropped." More attempts per hour is the only way cron alone gets nearer real-time.
+    # And this is CHEAPER than before despite 3x the attempts: the probe step below exits
+    # an empty-queue run in ~20s instead of burning ~6 min installing Chromium for nothing.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:               # + the app dispatches this the moment a job is queued
 
 # only one drain at a time (no overlapping workers double-claiming)
 concurrency:
@@ -14,15 +21,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 18
     steps:
+      # ---------------------------------------------------------------
+      # Cheap gate: one REST call — no checkout, no pip, no browser download.
+      # ---------------------------------------------------------------
+      - name: Anything to do?
+        id: probe
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+        run: |
+          set -uo pipefail
+          # queued/approved      = real user work waiting.
+          # preparing/submitting = a job some dead worker orphaned mid-claim; worker.py's
+          #                        reclaim_stale() resets those on boot, so they MUST also
+          #                        wake the worker or they would sit in limbo forever.
+          url="$SUPABASE_URL/rest/v1/autoapply_jobs?select=id&limit=1&status=in.(queued,approved,preparing,submitting)"
+          body=$(curl -sS --max-time 15 "$url" -H "apikey: $SUPABASE_SERVICE_ROLE" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE" 2>/dev/null) || body=""
+          echo "probe body: ${body:0:200}"
+          # FAIL OPEN: an empty or garbled response means we do NOT know, so run the full
+          # drain. A probe glitch must never silently skip a real user's application.
+          if [ "$body" = "[]" ]; then
+            echo "pending=0" >> "$GITHUB_OUTPUT"
+            echo "queue empty -> skipping the heavy steps (~20s run)"
+          elif [ -z "$body" ]; then
+            echo "pending=1" >> "$GITHUB_OUTPUT"
+            echo "probe FAILED -> running the full drain anyway (fail-open)"
+          else
+            echo "pending=1" >> "$GITHUB_OUTPUT"
+            echo "work found -> full drain"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.probe.outputs.pending == '1'
       - uses: actions/setup-python@v5
+        if: steps.probe.outputs.pending == '1'
         with:
           python-version: '3.11'
       - name: Install deps + Chromium
+        if: steps.probe.outputs.pending == '1'
         run: |
           pip install -q browser-use==0.13.3 supabase playwright
           python -m playwright install --with-deps chromium
       - name: Drain the auto-apply queue (deterministic Tier-1 + LLM fallback)
+        if: steps.probe.outputs.pending == '1'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
