@@ -1,0 +1,58 @@
+name: keepalive
+# ============================================================
+# WHY THIS EXISTS (2026-07-25)
+# GitHub docs, "Events that trigger workflows": "In a public repository, scheduled
+# workflows are automatically disabled when no repository activity has occurred in
+# 60 days." This repo is public and its last push was 2026-07-18, so the
+# autoapply-worker-drain cron would have been silently switched off around
+# 2026-09-16 — no error, no email, auto-apply jobs would just sit in the queue
+# forever. This job keeps the repo "active" and, as a belt-and-braces second
+# check, re-enables the drain workflow if GitHub ever disables it anyway.
+#
+# Runs on the 1st and 15th of every month: two chances per month, because GitHub
+# also drops some scheduled runs under load ("some queued jobs may be dropped").
+# Pushes made with GITHUB_TOKEN do not trigger workflow runs, so this cannot loop.
+# ============================================================
+on:
+  schedule:
+    - cron: '19 3 1,15 * *'   # 03:19 UTC, 1st + 15th (off the top of the hour on purpose)
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push the keepalive commit
+  actions: write    # re-enable the drain workflow if GitHub disabled it
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit a dated line so the 60-day inactivity clock resets
+        run: |
+          set -euo pipefail
+          date -u +"drain-cron kept alive %Y-%m-%dT%H:%M:%SZ" >> .keepalive
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "chore(keepalive): keep the auto-apply drain cron enabled"
+          git push
+          echo "pushed: $(git log -1 --pretty=%H)"
+
+      - name: Verify the drain cron is still enabled (re-enable it if not)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          state=$(gh api "repos/${{ github.repository }}/actions/workflows/worker.yml" --jq .state)
+          echo "autoapply-worker-drain state: $state"
+          if [ "$state" != "active" ]; then
+            echo "::warning::drain workflow was '$state' — re-enabling it"
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/worker.yml/enable"
+            echo "re-enabled; new state: $(gh api "repos/${{ github.repository }}/actions/workflows/worker.yml" --jq .state)"
+          fi
